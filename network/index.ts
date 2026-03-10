@@ -14,6 +14,9 @@ export type Facade = {
     iceConnectionState: RTCIceConnectionState;
     signalingState: RTCSignalingState;
   };
+  startMedia: (stream: MediaStream) => void;
+  stopMedia: () => void;
+  onRemoteStream: (handler: (stream: MediaStream | null) => void) => void;
 };
 
 export const createClient = (): Facade => {
@@ -21,6 +24,8 @@ export const createClient = (): Facade => {
   let peer: ReturnType<typeof createRtcPeer> | null = null;
   let onMessageHandler: ((data: unknown) => void) | null = null;
   let onConnectionHandler: ((state: RTCPeerConnectionState) => void) | null = null;
+  let onRemoteStreamHandler: ((stream: MediaStream | null) => void) | null = null;
+  let pendingMediaStream: MediaStream | null = null;
 
   const register = async (url: string) => {
     await signaling.connect(url);
@@ -48,11 +53,22 @@ export const createClient = (): Facade => {
       });
     }
     const pc = new RTCPeerConnection({ iceServers: result.iceServers });
-    peer = createRtcPeer(result.peerId, pc, signaling, (data) => {
-      onMessageHandler?.(data);
+    peer = createRtcPeer(result.peerId, pc, signaling, {
+      onMessage: (data) => {
+        onMessageHandler?.(data);
+      },
+      onRemoteStream: (stream) => {
+        onRemoteStreamHandler?.(stream);
+      },
     });
     if (onConnectionHandler) {
       peer.onConnectionState(onConnectionHandler);
+    }
+    if (onRemoteStreamHandler) {
+      peer.onRemoteStream(onRemoteStreamHandler);
+    }
+    if (pendingMediaStream) {
+      peer.startMedia(pendingMediaStream);
     }
     return { peerId: result.peerId };
   };
@@ -90,5 +106,31 @@ export const createClient = (): Facade => {
     };
   };
 
-  return { register, connect, send, disconnect, onMessage, onConnectionState, pcState };
+  const startMedia = (stream: MediaStream) => {
+    pendingMediaStream = stream;
+    peer?.startMedia(stream);
+  };
+
+  const stopMedia = () => {
+    pendingMediaStream = null;
+    peer?.stopMedia();
+  };
+
+  const onRemoteStream = (handler: (stream: MediaStream | null) => void) => {
+    onRemoteStreamHandler = handler;
+    peer?.onRemoteStream(handler);
+  };
+
+  return {
+    register,
+    connect,
+    send,
+    disconnect,
+    onMessage,
+    onConnectionState,
+    pcState,
+    startMedia,
+    stopMedia,
+    onRemoteStream,
+  };
 };

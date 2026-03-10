@@ -1,10 +1,15 @@
-import type { PeerEvent, PeerState } from "../state/peerState";
-import { nextState } from "../state/peerState";
+import type { PeerEvent, PeerState, MediaEvent, MediaState } from "../state/peerState";
+import { nextState, nextMediaState } from "../state/peerState";
 import type { SignalMessage } from "../signaling/client";
 
 type Signaling = {
   relay: (message: SignalMessage) => void;
   on: (event: "signal", handler: (message: SignalMessage) => void) => void;
+};
+
+type RtcPeerOptions = {
+  onMessage?: (data: unknown) => void;
+  onRemoteStream?: (stream: MediaStream | null) => void;
 };
 
 export type RtcPeerApi = {
@@ -13,6 +18,9 @@ export type RtcPeerApi = {
   send: (data: string) => void;
   getPc: () => RTCPeerConnection;
   onConnectionState: (handler: (state: RTCPeerConnectionState) => void) => void;
+  startMedia: (stream: MediaStream) => void;
+  stopMedia: () => void;
+  onRemoteStream: (handler: (stream: MediaStream | null) => void) => void;
 };
 
 export class RtcPeer {
@@ -26,17 +34,27 @@ export class RtcPeer {
   private readonly signaling: Signaling;
   private readonly onMessage?: (data: unknown) => void;
   private onConnectionState?: (state: RTCPeerConnectionState) => void;
+  private localStream: MediaStream | null = null;
+  private remoteStream: MediaStream | null = null;
+  private onRemoteStreamHandler: ((stream: MediaStream | null) => void) | null = null;
+  private senders: RTCRtpSender[] = [];
+  private mediaState: MediaState = "idle";
+  private negotiating = false;
+  private renegotiateQueued = false;
 
   public constructor(
     id: string,
     pc: RTCPeerConnection,
     signaling: Signaling,
-    onMessage?: (data: unknown) => void,
+    options: RtcPeerOptions = {},
   ) {
     this.id = id;
     this.pc = pc;
     this.signaling = signaling;
-    this.onMessage = onMessage;
+    this.onMessage = options.onMessage;
+    if (options.onRemoteStream) {
+      this.onRemoteStreamHandler = options.onRemoteStream;
+    }
 
     // Signal inbound messages (offer/answer/ice)
     this.signaling.on("signal", (message) => {
@@ -70,6 +88,17 @@ export class RtcPeer {
       this.dc = event.channel;
       this.bindDataChannel();
     };
+
+    this.pc.addEventListener("track", (event) => {
+      this.handleRemoteTrack(event);
+    });
+
+    this.pc.addEventListener("negotiationneeded", () => {
+      if (!this.canNegotiate()) {
+        return;
+      }
+      void this.negotiate();
+    });
   }
 
   // Public API (Facade surface)
@@ -100,6 +129,21 @@ export class RtcPeer {
     this.onConnectionState = handler;
   };
 
+  public startMedia = (stream: MediaStream) => {
+    this.localStream = stream;
+    this.dispatchMedia("REQUEST");
+  };
+
+  public stopMedia = () => {
+    this.localStream = null;
+    this.dispatchMedia("STOP");
+  };
+
+  public onRemoteStream = (handler: (stream: MediaStream | null) => void) => {
+    this.onRemoteStreamHandler = handler;
+    handler?.(this.remoteStream);
+  };
+
   // DC lifecycle
   private bindDataChannel = () => {
     if (!this.dc) {
@@ -108,9 +152,16 @@ export class RtcPeer {
     this.dc.onmessage = (event) => {
       this.onMessage?.(event.data);
     };
+    this.dc.onopen = () => {
+      this.attemptActivateMedia();
+    };
     this.dc.onclose = () => {
+      this.dispatchMedia("DISCONNECT");
       this.dispatch("DISCONNECT");
     };
+    if (this.dc.readyState === "open") {
+      this.attemptActivateMedia();
+    }
   };
 
   // Signal handling (offer/answer/ice)
@@ -197,7 +248,137 @@ export class RtcPeer {
   private closeConnection = () => {
     this.dc?.close();
     this.dc = null;
+    this.dispatchMedia("DISCONNECT");
     this.remoteId = null;
+  };
+  
+  private detachLocalMedia = () => {
+    if (!this.senders.length) {
+      return;
+    }
+    for (const sender of this.senders) {
+      try {
+        this.pc.removeTrack(sender);
+      } catch {
+        // ignore
+      }
+    }
+    this.senders = [];
+  };
+
+  private ensureRemoteStream = () => {
+    if (!this.remoteStream) {
+      this.remoteStream = new MediaStream();
+    }
+    return this.remoteStream;
+  };
+
+  private handleRemoteTrack = (event: RTCTrackEvent) => {
+    const [stream] = event.streams;
+    if (stream) {
+      this.remoteStream = stream;
+    } else {
+      const target = this.ensureRemoteStream();
+      target.addTrack(event.track);
+      this.remoteStream = target;
+    }
+    event.track.addEventListener("ended", () => {
+      this.handleRemoteTrackEnded();
+    });
+    if (this.onRemoteStreamHandler && this.remoteStream) {
+      this.onRemoteStreamHandler(this.remoteStream);
+    }
+  };
+
+  private handleRemoteTrackEnded = () => {
+    if (!this.remoteStream) {
+      return;
+    }
+    const hasLiveTracks = this.remoteStream.getTracks().some((track) => track.readyState !== "ended");
+    if (!hasLiveTracks) {
+      this.clearRemoteStream();
+    }
+  };
+
+  private clearRemoteStream = () => {
+    if (!this.remoteStream) {
+      return;
+    }
+    for (const track of this.remoteStream.getTracks()) {
+      try {
+        track.stop();
+      } catch {
+        // ignore
+      }
+    }
+    this.remoteStream = null;
+    this.onRemoteStreamHandler?.(null);
+  };
+
+  private isMediaReady = () => this.dc?.readyState === "open";
+
+  private dispatchMedia = (event: MediaEvent) => {
+    const next = nextMediaState(this.mediaState, event);
+    if (next === this.mediaState) {
+      if (event === "REQUEST" && next === "starting") {
+        this.attemptActivateMedia();
+      }
+      return;
+    }
+    this.mediaState = next;
+    if (next === "starting") {
+      this.detachLocalMedia();
+      this.attemptActivateMedia();
+      return;
+    }
+    if (next === "idle") {
+      this.detachLocalMedia();
+      this.clearRemoteStream();
+    }
+  };
+
+  private attemptActivateMedia = () => {
+    if (this.mediaState !== "starting") {
+      return;
+    }
+    if (!this.localStream || !this.isMediaReady()) {
+      return;
+    }
+    for (const track of this.localStream.getTracks()) {
+      const sender = this.pc.addTrack(track, this.localStream);
+      this.senders.push(sender);
+    }
+    this.dispatchMedia("READY");
+  };
+
+  private canNegotiate = () => Boolean(this.remoteId && this.isMediaReady());
+
+  private negotiate = async () => {
+    if (!this.remoteId) {
+      return;
+    }
+    if (this.negotiating) {
+      this.renegotiateQueued = true;
+      return;
+    }
+    this.negotiating = true;
+    try {
+      const offer = await this.pc.createOffer();
+      await this.pc.setLocalDescription(offer);
+      const msg: SignalMessage = {
+        from: this.id,
+        to: this.remoteId,
+        type: "offer",
+        payload: offer,
+      };
+      this.signaling.relay(msg);
+    } finally {
+      this.negotiating = false;
+      if (this.renegotiateQueued) {
+        this.renegotiateQueued = false;
+        void this.negotiate();
+      }
+    }
   };
 }
 
@@ -205,14 +386,17 @@ export const createRtcPeer = (
   id: string,
   pc: RTCPeerConnection,
   signaling: Signaling,
-  onMessage?: (data: unknown) => void,
+  options?: RtcPeerOptions,
 ): RtcPeerApi => {
-  const peer = new RtcPeer(id, pc, signaling, onMessage);
+  const peer = new RtcPeer(id, pc, signaling, options);
   return {
     connect: peer.connect,
     disconnect: peer.disconnect,
     send: peer.send,
     getPc: peer.getPc,
     onConnectionState: peer.onConnectionStateChange,
+    startMedia: peer.startMedia,
+    stopMedia: peer.stopMedia,
+    onRemoteStream: peer.onRemoteStream,
   };
 };
