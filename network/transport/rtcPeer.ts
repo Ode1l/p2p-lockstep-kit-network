@@ -1,26 +1,10 @@
 import type { PeerEvent, PeerState, MediaEvent, MediaState } from "../state/peerState";
 import { nextState, nextMediaState } from "../state/peerState";
-import type { SignalMessage } from "../signaling/client";
-
-type Signaling = {
-  relay: (message: SignalMessage) => void;
-  on: (event: "signal", handler: (message: SignalMessage) => void) => void;
-};
+import {SignalingClient, SignalMessage} from "../signaling/client";
 
 type RtcPeerOptions = {
   onMessage?: (data: unknown) => void;
   onRemoteStream?: (stream: MediaStream | null) => void;
-};
-
-export type RtcPeerApi = {
-  connect: (targetId: string) => Promise<void>;
-  disconnect: () => void;
-  send: (data: string) => void;
-  getPc: () => RTCPeerConnection;
-  onConnectionState: (handler: (state: RTCPeerConnectionState) => void) => void;
-  startMedia: (stream: MediaStream) => void;
-  stopMedia: () => void;
-  onRemoteStream: (handler: (stream: MediaStream | null) => void) => void;
 };
 
 export class RtcPeer {
@@ -31,9 +15,9 @@ export class RtcPeer {
   private remoteId: string | null = null;
   private requestedId: string | null = null;
   private state: PeerState = "passive";
-  private readonly signaling: Signaling;
+  private readonly signaling: SignalingClient;
   private readonly onMessage?: (data: unknown) => void;
-  private onConnectionState?: (state: RTCPeerConnectionState) => void;
+  private onConnectionStateHandler?: (state: RTCPeerConnectionState) => void;
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
   private onRemoteStreamHandler: ((stream: MediaStream | null) => void) | null = null;
@@ -41,12 +25,13 @@ export class RtcPeer {
   private mediaState: MediaState = "idle";
   private negotiating = false;
   private renegotiateQueued = false;
+  private readonly onSignalHandler: (message: SignalMessage) => void;
 
   public constructor(
-    id: string,
-    pc: RTCPeerConnection,
-    signaling: Signaling,
-    options: RtcPeerOptions = {},
+      id: string,
+      pc: RTCPeerConnection,
+      signaling: SignalingClient,
+      options: RtcPeerOptions = {},
   ) {
     this.id = id;
     this.pc = pc;
@@ -55,15 +40,16 @@ export class RtcPeer {
     if (options.onRemoteStream) {
       this.onRemoteStreamHandler = options.onRemoteStream;
     }
+    this.onSignalHandler = (message) => {
+      void this.handleSignal(message);
+    };
 
     // Signal inbound messages (offer/answer/ice)
-    this.signaling.on("signal", (message) => {
-      void this.handleSignal(message);
-    });
+    this.signaling.onSignal(this.onSignalHandler);
 
     // PC connection state -> state machine
     this.pc.addEventListener("connectionstatechange", () => {
-      this.onConnectionState?.(this.pc.connectionState);
+      this.onConnectionStateHandler?.(this.pc.connectionState);
       if (this.pc.connectionState === "connected") {
         this.dispatch("CONNECTED");
       }
@@ -125,8 +111,8 @@ export class RtcPeer {
   };
 
   public getPc = () => this.pc;
-  public onConnectionStateChange = (handler: (state: RTCPeerConnectionState) => void) => {
-    this.onConnectionState = handler;
+  public onConnectionState = (handler: (state: RTCPeerConnectionState) => void) => {
+    this.onConnectionStateHandler = handler;
   };
 
   public startMedia = (stream: MediaStream) => {
@@ -381,22 +367,3 @@ export class RtcPeer {
     }
   };
 }
-
-export const createRtcPeer = (
-  id: string,
-  pc: RTCPeerConnection,
-  signaling: Signaling,
-  options?: RtcPeerOptions,
-): RtcPeerApi => {
-  const peer = new RtcPeer(id, pc, signaling, options);
-  return {
-    connect: peer.connect,
-    disconnect: peer.disconnect,
-    send: peer.send,
-    getPc: peer.getPc,
-    onConnectionState: peer.onConnectionStateChange,
-    startMedia: peer.startMedia,
-    stopMedia: peer.stopMedia,
-    onRemoteStream: peer.onRemoteStream,
-  };
-};

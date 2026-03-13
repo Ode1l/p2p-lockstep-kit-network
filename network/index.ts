@@ -1,40 +1,27 @@
-import { createSignalingClient } from "./signaling/client";
-import { createRtcPeer } from "./transport/rtcPeer";
+import { SignalingClient } from "./signaling/client";
+import { RtcPeer } from "./transport/rtcPeer";
 import { clearSession, loadSession, saveSession } from "./signaling/session";
 
-export type Facade = {
-  register: (url: string) => Promise<{ peerId: string }>;
-  connect: (targetId: string) => Promise<void>;
-  send: (data: string) => void;
-  disconnect: () => void;
-  onMessage: (handler: (data: unknown) => void) => void;
-  onConnectionState: (handler: (state: RTCPeerConnectionState) => void) => void;
-  pcState: () => {
-    connectionState: RTCPeerConnectionState;
-    iceConnectionState: RTCIceConnectionState;
-    signalingState: RTCSignalingState;
-  };
-  startMedia: (stream: MediaStream) => void;
-  stopMedia: () => void;
-  onRemoteStream: (handler: (stream: MediaStream | null) => void) => void;
-};
+export class NetworkClient {
+  private readonly signaling: SignalingClient;
+  private peer: RtcPeer | null = null;
+  private onMessageHandler: ((data: unknown) => void) | null = null;
+  private onConnectionHandler: ((state: RTCPeerConnectionState) => void) | null = null;
+  private onRemoteStreamHandler: ((stream: MediaStream | null) => void) | null = null;
+  private pendingMediaStream: MediaStream | null = null;
 
-export const createClient = (): Facade => {
-  const signaling = createSignalingClient();
-  let peer: ReturnType<typeof createRtcPeer> | null = null;
-  let onMessageHandler: ((data: unknown) => void) | null = null;
-  let onConnectionHandler: ((state: RTCPeerConnectionState) => void) | null = null;
-  let onRemoteStreamHandler: ((stream: MediaStream | null) => void) | null = null;
-  let pendingMediaStream: MediaStream | null = null;
+  public constructor(signaling = new SignalingClient()) {
+    this.signaling = signaling;
+  }
 
-  const register = async (url: string) => {
-    await signaling.connect(url);
+  public async register(url: string) {
+    await this.signaling.connect(url);
     const cached = loadSession();
     let result: { peerId: string; iceServers: RTCIceServer[]; resumeToken: string } | null =
       null;
     if (cached) {
       try {
-        result = await signaling.resume({
+        result = await this.signaling.resume({
           peerId: cached.peerId,
           resumeToken: cached.resumeToken,
         });
@@ -43,7 +30,7 @@ export const createClient = (): Facade => {
       }
     }
     if (!result) {
-      result = await signaling.register();
+      result = await this.signaling.register();
     }
     if (result.resumeToken) {
       saveSession({
@@ -53,84 +40,73 @@ export const createClient = (): Facade => {
       });
     }
     const pc = new RTCPeerConnection({ iceServers: result.iceServers });
-    peer = createRtcPeer(result.peerId, pc, signaling, {
+    this.peer = new RtcPeer(result.peerId, pc, this.signaling, {
       onMessage: (data) => {
-        onMessageHandler?.(data);
+        this.onMessageHandler?.(data);
       },
       onRemoteStream: (stream) => {
-        onRemoteStreamHandler?.(stream);
+        this.onRemoteStreamHandler?.(stream);
       },
     });
-    if (onConnectionHandler) {
-      peer.onConnectionState(onConnectionHandler);
+    if (this.onConnectionHandler) {
+      this.peer.onConnectionState(this.onConnectionHandler);
     }
-    if (onRemoteStreamHandler) {
-      peer.onRemoteStream(onRemoteStreamHandler);
+    if (this.onRemoteStreamHandler) {
+      this.peer.onRemoteStream(this.onRemoteStreamHandler);
     }
-    if (pendingMediaStream) {
-      peer.startMedia(pendingMediaStream);
+    if (this.pendingMediaStream) {
+      this.peer.startMedia(this.pendingMediaStream);
     }
     return { peerId: result.peerId };
-  };
+  }
 
-  const connect = async (targetId: string) => {
-    if (!peer) {
+  public async connect(targetId: string) {
+    if (!this.peer) {
       return;
     }
-    await peer.connect(targetId);
-  };
+    await this.peer.connect(targetId);
+  }
 
-  const send = (data: string) => {
-    peer?.send(data);
-  };
+  public send(data: string) {
+    this.peer?.send(data);
+  }
 
-  const disconnect = () => {
-    peer?.disconnect();
-  };
+  public disconnect() {
+    this.peer?.disconnect();
+  }
 
-  const onMessage = (handler: (data: unknown) => void) => {
-    onMessageHandler = handler;
-  };
+  public onMessage(handler: (data: unknown) => void) {
+    this.onMessageHandler = handler;
+  }
 
-  const onConnectionState = (handler: (state: RTCPeerConnectionState) => void) => {
-    onConnectionHandler = handler;
-    peer?.onConnectionState(handler);
-  };
+  public onConnectionState(handler: (state: RTCPeerConnectionState) => void) {
+    this.onConnectionHandler = handler;
+    this.peer?.onConnectionState(handler);
+  }
 
-  const pcState = () => {
-    const pc = peer?.getPc();
+  public pcState() {
+    const pc = this.peer?.getPc();
     return {
       connectionState: pc?.connectionState ?? "new",
       iceConnectionState: pc?.iceConnectionState ?? "new",
       signalingState: pc?.signalingState ?? "stable",
     };
-  };
+  }
 
-  const startMedia = (stream: MediaStream) => {
-    pendingMediaStream = stream;
-    peer?.startMedia(stream);
-  };
+  public startMedia(stream: MediaStream) {
+    this.pendingMediaStream = stream;
+    this.peer?.startMedia(stream);
+  }
 
-  const stopMedia = () => {
-    pendingMediaStream = null;
-    peer?.stopMedia();
-  };
+  public stopMedia() {
+    this.pendingMediaStream = null;
+    this.peer?.stopMedia();
+  }
 
-  const onRemoteStream = (handler: (stream: MediaStream | null) => void) => {
-    onRemoteStreamHandler = handler;
-    peer?.onRemoteStream(handler);
-  };
+  public onRemoteStream(handler: (stream: MediaStream | null) => void) {
+    this.onRemoteStreamHandler = handler;
+    this.peer?.onRemoteStream(handler);
+  }
+}
 
-  return {
-    register,
-    connect,
-    send,
-    disconnect,
-    onMessage,
-    onConnectionState,
-    pcState,
-    startMedia,
-    stopMedia,
-    onRemoteStream,
-  };
-};
+export const createClient = () => new NetworkClient();
