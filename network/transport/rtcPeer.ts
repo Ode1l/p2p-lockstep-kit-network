@@ -115,6 +115,12 @@ export class RtcPeer {
     this.onConnectionStateHandler = handler;
   };
 
+  public getPeerId = () => this.id;
+  public getRemoteId = () => this.remoteId;
+  public getPeerState = () => this.state;
+  public getDataChannelState = (): RTCDataChannelState => this.dc?.readyState ?? "closed";
+  public getMediaState = () => this.mediaState;
+
   public startMedia = (stream: MediaStream) => {
     this.localStream = stream;
     this.dispatchMedia("REQUEST");

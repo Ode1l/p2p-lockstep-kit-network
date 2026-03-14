@@ -1,6 +1,7 @@
 import { SignalingClient } from "./signaling/client";
 import { RtcPeer } from "./transport/rtcPeer";
 import { clearSession, loadSession, saveSession } from "./signaling/session";
+import type { PeerState, MediaState } from "./state/peerState";
 
 export class NetworkClient {
   private readonly signaling: SignalingClient;
@@ -9,6 +10,7 @@ export class NetworkClient {
   private onConnectionHandler: ((state: RTCPeerConnectionState) => void) | null = null;
   private onRemoteStreamHandler: ((stream: MediaStream | null) => void) | null = null;
   private pendingMediaStream: MediaStream | null = null;
+  private localPeerIdValue: string | null = null;
 
   public constructor(signaling = new SignalingClient()) {
     this.signaling = signaling;
@@ -40,6 +42,7 @@ export class NetworkClient {
       });
     }
     const pc = new RTCPeerConnection({ iceServers: result.iceServers });
+    this.localPeerIdValue = result.peerId;
     this.peer = new RtcPeer(result.peerId, pc, this.signaling, {
       onMessage: (data) => {
         this.onMessageHandler?.(data);
@@ -107,6 +110,13 @@ export class NetworkClient {
     this.onRemoteStreamHandler = handler;
     this.peer?.onRemoteStream(handler);
   }
+
+  public localPeerId = () => this.localPeerIdValue;
+  public remotePeerId = () => this.peer?.getRemoteId() ?? null;
+  public peerState = (): PeerState => this.peer?.getPeerState() ?? "passive";
+  public dataChannelState = (): RTCDataChannelState =>
+    this.peer?.getDataChannelState() ?? "closed";
+  public mediaState = (): MediaState => this.peer?.getMediaState() ?? "idle";
 }
 
 export const createClient = () => new NetworkClient();
