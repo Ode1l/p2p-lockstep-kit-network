@@ -20,8 +20,8 @@ export class RtcPeer {
     private negotiating = false;
     private renegotiateQueued = false;
     private readonly onSignalHandler: (message: SignalMessage) => void;
-    private onStateChangeHandler: (state: PeerState | null) => void | null = null;
-    private onMediaChangeHandler: (state: MediaState | null) => void | null = null;
+    private readonly onStateChangeHandler: ((state: PeerState) => void) | null = null;
+    private readonly onMediaChangeHandler: ((state: MediaState) => void) | null = null;
 
     public constructor(
         id: string,
@@ -30,7 +30,7 @@ export class RtcPeer {
         onMessage?: (data: String) => void,
         onRemoteStream?: (stream: MediaStream | null) => void,
         onStateChange?: (state: PeerState) => void,
-        onMediaChange?: (state: MediaState | null) => void,
+        onMediaChange?: (state: MediaState) => void,
     ) {
         this.id = id;
         this.pc = pc;
@@ -194,6 +194,7 @@ export class RtcPeer {
             return;
         }
         this.state = next;
+        this.onStateChangeHandler?.(this.state);
 
         if (next === "requesting") {
             if (this.requestedId) {
@@ -314,6 +315,7 @@ export class RtcPeer {
             return;
         }
         this.mediaState = next;
+        this.onMediaChangeHandler?.(this.mediaState);
         if (next === "starting") {
             this.detachLocalMedia();
             this.attemptActivateMedia();

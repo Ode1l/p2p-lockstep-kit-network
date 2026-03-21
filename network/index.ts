@@ -49,6 +49,13 @@ export class NetworkClient {
             (stream) => {
                 this.onRemoteStreamHandler?.(stream);
             },
+            (state) => {
+                this.onStateChangeHandler?.(state);
+            },
+            (state) => {
+                this.onMediaChangeHandler?.(state);
+            }
+
         );
         if (this.onRemoteStreamHandler) {
             this.peer.onRemoteStream(this.onRemoteStreamHandler);
