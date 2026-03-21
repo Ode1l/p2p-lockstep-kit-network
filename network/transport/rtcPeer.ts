@@ -1,11 +1,6 @@
-import type { PeerEvent, PeerState, MediaEvent, MediaState } from "../state/peerState";
-import { nextState, nextMediaState } from "../state/peerState";
+import type {MediaEvent, MediaState, PeerEvent, PeerState} from "../state/peerState";
+import {nextMediaState, nextState} from "../state/peerState";
 import {SignalingClient, SignalMessage} from "../signaling/client";
-
-type RtcPeerOptions = {
-  onMessage?: (data: unknown) => void;
-  onRemoteStream?: (stream: MediaStream | null) => void;
-};
 
 export class RtcPeer {
     // Core state and dependencies
@@ -16,32 +11,41 @@ export class RtcPeer {
     private requestedId: string | null = null;
     private state: PeerState = "passive";
     private readonly signaling: SignalingClient;
-    private readonly onMessage?: (data: unknown) => void;
+    private readonly onMessageHandler?: (data: String) => void;
     private localStream: MediaStream | null = null;
     private remoteStream: MediaStream | null = null;
     private onRemoteStreamHandler: ((stream: MediaStream | null) => void) | null = null;
-  private senders: RTCRtpSender[] = [];
-  private mediaState: MediaState = "idle";
-  private negotiating = false;
-  private renegotiateQueued = false;
-  private readonly onSignalHandler: (message: SignalMessage) => void;
+    private senders: RTCRtpSender[] = [];
+    private mediaState: MediaState = "idle";
+    private negotiating = false;
+    private renegotiateQueued = false;
+    private readonly onSignalHandler: (message: SignalMessage) => void;
+    private onStateChangeHandler: (state: PeerState | null) => void | null = null;
+    private onMediaChangeHandler: (state: MediaState | null) => void | null = null;
 
-  public constructor(
-      id: string,
-      pc: RTCPeerConnection,
-      signaling: SignalingClient,
-      options: RtcPeerOptions = {},
-  ) {
-    this.id = id;
-    this.pc = pc;
-    this.signaling = signaling;
-    this.onMessage = options.onMessage;
-    if (options.onRemoteStream) {
-      this.onRemoteStreamHandler = options.onRemoteStream;
-    }
-    this.onSignalHandler = (message) => {
-      void this.handleSignal(message);
-    };
+    public constructor(
+        id: string,
+        pc: RTCPeerConnection,
+        signaling: SignalingClient,
+        onMessage?: (data: String) => void,
+        onRemoteStream?: (stream: MediaStream | null) => void,
+        onStateChange?: (state: PeerState) => void,
+        onMediaChange?: (state: MediaState | null) => void,
+    ) {
+        this.id = id;
+        this.pc = pc;
+        this.signaling = signaling;
+        if (onMessage)
+            this.onMessageHandler = onMessage;
+        if (onRemoteStream)
+            this.onRemoteStreamHandler = onRemoteStream;
+        if (onStateChange)
+            this.onStateChangeHandler = onStateChange;
+        if (onMediaChange)
+            this.onMediaChangeHandler = onMediaChange;
+        this.onSignalHandler = (message) => {
+            void this.handleSignal(message);
+        };
 
         // Signal inbound messages (offer/answer/ice)
         this.signaling.onSignal(this.onSignalHandler);
@@ -108,11 +112,9 @@ export class RtcPeer {
         this.dc.send(data);
     };
 
-    public getPc = () => this.pc;
     public getPeerId = () => this.id;
     public getRemoteId = () => this.remoteId;
     public getPeerState = () => this.state;
-    public getDataChannelState = (): RTCDataChannelState => this.dc?.readyState ?? "closed";
     public getMediaState = () => this.mediaState;
 
     public startMedia = (stream: MediaStream) => {
@@ -136,19 +138,19 @@ export class RtcPeer {
             return;
         }
         this.dc.onmessage = (event) => {
-            this.onMessage?.(event.data);
+            this.onMessageHandler?.(event.data);
         };
-    this.dc.onopen = () => {
-      this.attemptActivateMedia();
+        this.dc.onopen = () => {
+            this.attemptActivateMedia();
+        };
+        this.dc.onclose = () => {
+            this.dispatchMedia("DISCONNECT");
+            this.dispatch("DISCONNECT");
+        };
+        if (this.dc.readyState === "open") {
+            this.attemptActivateMedia();
+        }
     };
-    this.dc.onclose = () => {
-      this.dispatchMedia("DISCONNECT");
-      this.dispatch("DISCONNECT");
-    };
-    if (this.dc.readyState === "open") {
-      this.attemptActivateMedia();
-    }
-  };
 
     // Signal handling (offer/answer/ice)
     private handleSignal = async (message: SignalMessage) => {
@@ -185,13 +187,13 @@ export class RtcPeer {
     };
 
     // State machine transitions
-  private dispatch = (event: PeerEvent) => {
-    // State Machine: event-driven transition + side effects.
-    const next = nextState(this.state, event);
-    if (this.state === next) {
-      return;
-    }
-    this.state = next;
+    private dispatch = (event: PeerEvent) => {
+        // State Machine: event-driven transition + side effects.
+        const next = nextState(this.state, event);
+        if (this.state === next) {
+            return;
+        }
+        this.state = next;
 
         if (next === "requesting") {
             if (this.requestedId) {
@@ -202,15 +204,15 @@ export class RtcPeer {
             return;
         }
 
-    if (next === "passive") {
-      this.closeConnection();
-      if (this.requestedId) {
-        this.remoteId = this.requestedId;
-        this.requestedId = null;
-        this.dispatch("CONNECT");
-      }
-    }
-  };
+        if (next === "passive") {
+            this.closeConnection();
+            if (this.requestedId) {
+                this.remoteId = this.requestedId;
+                this.requestedId = null;
+                this.dispatch("CONNECT");
+            }
+        }
+    };
 
     // Active offer creation
     private startOffer = async () => {
@@ -303,25 +305,25 @@ export class RtcPeer {
 
     private isMediaReady = () => this.dc?.readyState === "open";
 
-  private dispatchMedia = (event: MediaEvent) => {
-    const next = nextMediaState(this.mediaState, event);
-    if (next === this.mediaState) {
-      if (event === "REQUEST" && next === "starting") {
-        this.attemptActivateMedia();
-      }
-      return;
-    }
-    this.mediaState = next;
-    if (next === "starting") {
-      this.detachLocalMedia();
-      this.attemptActivateMedia();
-      return;
-    }
-    if (next === "idle") {
-      this.detachLocalMedia();
-      this.clearRemoteStream();
-    }
-  };
+    private dispatchMedia = (event: MediaEvent) => {
+        const next = nextMediaState(this.mediaState, event);
+        if (next === this.mediaState) {
+            if (event === "REQUEST" && next === "starting") {
+                this.attemptActivateMedia();
+            }
+            return;
+        }
+        this.mediaState = next;
+        if (next === "starting") {
+            this.detachLocalMedia();
+            this.attemptActivateMedia();
+            return;
+        }
+        if (next === "idle") {
+            this.detachLocalMedia();
+            this.clearRemoteStream();
+        }
+    };
 
     private attemptActivateMedia = () => {
         if (this.mediaState !== "starting") {
@@ -334,8 +336,8 @@ export class RtcPeer {
             const sender = this.pc.addTrack(track, this.localStream);
             this.senders.push(sender);
         }
-    this.dispatchMedia("READY");
-  };
+        this.dispatchMedia("READY");
+    };
 
     private canNegotiate = () => Boolean(this.remoteId && this.isMediaReady());
 

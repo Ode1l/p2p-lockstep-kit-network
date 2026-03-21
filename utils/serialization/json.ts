@@ -1,11 +1,9 @@
-export type Serialized = string;
+export const encode = <T>(value: T): string => JSON.stringify(value);
 
-export const encode = (value: unknown): Serialized => JSON.stringify(value);
-
-export const decode = <T>(raw: Serialized): T => JSON.parse(raw) as T;
+export const decode = <T>(raw: string): T => JSON.parse(raw) as T;
 
 export const decodeSafe = <T>(
-  raw: Serialized,
+  raw: string,
 ): { ok: true; value: T } | { ok: false; error: unknown } => {
   try {
     return { ok: true, value: JSON.parse(raw) as T };
