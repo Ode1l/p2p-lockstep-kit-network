@@ -2,11 +2,12 @@ import {SignalingClient} from "./signaling/client";
 import {RtcPeer} from "./transport/rtcPeer";
 import {clearSession, loadSession, saveSession} from "./signaling/session";
 import type {MediaState, PeerState} from "./state/peerState";
+import {decode, encode} from "../utils";
 
 export class NetworkClient {
     private readonly signaling: SignalingClient;
     private peer: RtcPeer | null = null;
-    private onMessageHandler: ((data: String) => void) | null = null;
+    private onMessageHandler: ((data: unknown) => void) | null = null;
     private onRemoteStreamHandler: ((stream: MediaStream | null) => void) | null = null;
     private pendingMediaStream: MediaStream | null = null;
     private onStateChangeHandler: ((state: PeerState) => void) | null = null;
@@ -44,7 +45,12 @@ export class NetworkClient {
         const pc = new RTCPeerConnection({iceServers: result.iceServers});
         this.peer = new RtcPeer(result.peerId, pc, this.signaling,
             (data) => {
-                this.onMessageHandler?.(data);
+                try {
+                    const parsed = decode<unknown>(String(data));
+                    this.onMessageHandler?.(parsed);
+                } catch {
+                    this.onMessageHandler?.(data);
+                }
             },
             (stream) => {
                 this.onRemoteStreamHandler?.(stream);
@@ -73,8 +79,9 @@ export class NetworkClient {
         await this.peer.connect(targetId);
     }
 
-    public send(data: string) {
-        this.peer?.send(data);
+    public send(data: unknown) {
+        const payload = encode(data);
+        this.peer?.send(payload);
     }
 
     public disconnect() {
@@ -88,7 +95,7 @@ export class NetworkClient {
      *   console.log("peer says", text);
      * });
      */
-    public onMessage(handler: (data: String) => void) {
+    public onMessage(handler: (data: unknown) => void) {
         this.onMessageHandler = handler;
     }
 
