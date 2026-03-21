@@ -7,10 +7,8 @@ export class NetworkClient {
   private readonly signaling: SignalingClient;
   private peer: RtcPeer | null = null;
   private onMessageHandler: ((data: unknown) => void) | null = null;
-  private onConnectionHandler: ((state: RTCPeerConnectionState) => void) | null = null;
   private onRemoteStreamHandler: ((stream: MediaStream | null) => void) | null = null;
   private pendingMediaStream: MediaStream | null = null;
-  private localPeerId: string | null = null;
 
   public constructor(signaling = new SignalingClient()) {
     this.signaling = signaling;
@@ -42,7 +40,6 @@ export class NetworkClient {
       });
     }
     const pc = new RTCPeerConnection({ iceServers: result.iceServers });
-    this.localPeerId = result.peerId;
     this.peer = new RtcPeer(result.peerId, pc, this.signaling, {
       onMessage: (data) => {
         this.onMessageHandler?.(data);
@@ -51,9 +48,6 @@ export class NetworkClient {
         this.onRemoteStreamHandler?.(stream);
       },
     });
-    if (this.onConnectionHandler) {
-      this.peer.onConnectionState(this.onConnectionHandler);
-    }
     if (this.onRemoteStreamHandler) {
       this.peer.onRemoteStream(this.onRemoteStreamHandler);
     }
@@ -78,22 +72,15 @@ export class NetworkClient {
     this.peer?.disconnect();
   }
 
+  /**
+   * eg：
+   * client.onMessage((payload) => {
+   *   const text = String(payload);
+   *   console.log("peer says", text);
+   * });
+   */
   public onMessage(handler: (data: unknown) => void) {
     this.onMessageHandler = handler;
-  }
-
-  public onConnectionState(handler: (state: RTCPeerConnectionState) => void) {
-    this.onConnectionHandler = handler;
-    this.peer?.onConnectionState(handler);
-  }
-
-  public pcState() {
-    const pc = this.peer?.getPc();
-    return {
-      connectionState: pc?.connectionState ?? "new",
-      iceConnectionState: pc?.iceConnectionState ?? "new",
-      signalingState: pc?.signalingState ?? "stable",
-    };
   }
 
   public startMedia(stream: MediaStream) {
@@ -111,11 +98,9 @@ export class NetworkClient {
     this.peer?.onRemoteStream(handler);
   }
 
-  public getLocalPeerId = () => this.localPeerId;
+  public getLocalPeerId = () => this.peer?.getPeerId() ?? null;
   public getRemotePeerId = () => this.peer?.getRemoteId() ?? null;
   public peerState = (): PeerState => this.peer?.getPeerState() ?? "passive";
-  public dataChannelState = (): RTCDataChannelState =>
-    this.peer?.getDataChannelState() ?? "closed";
   public mediaState = (): MediaState => this.peer?.getMediaState() ?? "idle";
 }
 
