@@ -18,6 +18,8 @@ export class NetworkClient {
     }
 
     public async register(url: string) {
+        this.peer?.dispose();
+        this.peer = null;
         await this.signaling.connect(url);
         const cached = loadSession();
         let result: { peerId: string; iceServers: RTCIceServer[]; resumeToken: string } | null =
@@ -66,6 +68,12 @@ export class NetworkClient {
         if (this.onRemoteStreamHandler) {
             this.peer.onRemoteStream(this.onRemoteStreamHandler);
         }
+        if (this.onStateChangeHandler) {
+            this.onStateChangeHandler(this.peer.getPeerState());
+        }
+        if (this.onMediaChangeHandler) {
+            this.onMediaChangeHandler(this.peer.getMediaState());
+        }
         if (this.pendingMediaStream) {
             this.peer.startMedia(this.pendingMediaStream);
         }
@@ -111,14 +119,17 @@ export class NetworkClient {
 
     public onRemoteStream(handler: (stream: MediaStream | null) => void) {
         this.onRemoteStreamHandler = handler;
+        this.peer?.onRemoteStream(handler);
     }
 
     public onStateChange(handler: (state: PeerState) => void) {
       this.onStateChangeHandler = handler;
+      handler(this.peer?.getPeerState() ?? "passive");
     }
 
     public onMediaChange(handler: (state: MediaState) => void) {
       this.onMediaChangeHandler = handler;
+      handler(this.peer?.getMediaState() ?? "idle");
     }
 
     public getLocalPeerId = () => this.peer?.getPeerId() ?? null;

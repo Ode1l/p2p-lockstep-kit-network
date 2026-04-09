@@ -11,7 +11,7 @@ export class RtcPeer {
     private requestedId: string | null = null;
     private state: PeerState = "passive";
     private readonly signaling: SignalingClient;
-    private readonly onMessageHandler?: (data: String) => void;
+    private readonly onMessageHandler?: (data: string) => void;
     private localStream: MediaStream | null = null;
     private remoteStream: MediaStream | null = null;
     private onRemoteStreamHandler: ((stream: MediaStream | null) => void) | null = null;
@@ -22,12 +22,50 @@ export class RtcPeer {
     private readonly onSignalHandler: (message: SignalMessage) => void;
     private readonly onStateChangeHandler: ((state: PeerState) => void) | null = null;
     private readonly onMediaChangeHandler: ((state: MediaState) => void) | null = null;
+    private readonly handleConnectionStateChange = () => {
+        if (this.pc.connectionState === "connected") {
+            this.dispatch("CONNECTED");
+            return;
+        }
+        if (
+            this.pc.connectionState === "closed" ||
+            this.pc.connectionState === "disconnected" ||
+            this.pc.connectionState === "failed"
+        ) {
+            this.dispatch("DISCONNECT");
+        }
+    };
+    private readonly handleIceCandidate = (event: RTCPeerConnectionIceEvent) => {
+        if (!event.candidate || !this.remoteId) {
+            return;
+        }
+        const msg: SignalMessage = {
+            from: this.id,
+            to: this.remoteId,
+            type: "ice",
+            payload: event.candidate.toJSON(),
+        };
+        this.signaling.relay(msg);
+    };
+    private readonly handleDataChannel = (event: RTCDataChannelEvent) => {
+        this.dc = event.channel;
+        this.bindDataChannel();
+    };
+    private readonly handleTrackEvent = (event: RTCTrackEvent) => {
+        this.handleRemoteTrack(event);
+    };
+    private readonly handleNegotiationNeeded = () => {
+        if (!this.canNegotiate()) {
+            return;
+        }
+        this.runTask(this.negotiate(), "negotiate");
+    };
 
     public constructor(
         id: string,
         pc: RTCPeerConnection,
         signaling: SignalingClient,
-        onMessage?: (data: String) => void,
+        onMessage?: (data: string) => void,
         onRemoteStream?: (stream: MediaStream | null) => void,
         onStateChange?: (state: PeerState) => void,
         onMediaChange?: (state: MediaState) => void,
@@ -44,49 +82,18 @@ export class RtcPeer {
         if (onMediaChange)
             this.onMediaChangeHandler = onMediaChange;
         this.onSignalHandler = (message) => {
-            void this.handleSignal(message);
+            this.runTask(this.handleSignal(message), `signal:${message.type}`);
         };
 
         // Signal inbound messages (offer/answer/ice)
         this.signaling.onSignal(this.onSignalHandler);
 
         // PC connection state -> state machine
-        this.pc.addEventListener("connectionstatechange", () => {
-            if (this.pc.connectionState === "connected") {
-                this.dispatch("CONNECTED");
-            }
-        });
-
-        // ICE candidate forwarding
-        this.pc.addEventListener("icecandidate", (event) => {
-            if (!event.candidate || !this.remoteId) {
-                return;
-            }
-            const msg: SignalMessage = {
-                from: this.id,
-                to: this.remoteId,
-                type: "ice",
-                payload: event.candidate.toJSON(),
-            };
-            this.signaling.relay(msg);
-        });
-
-        // DC inbound for passive side
-        this.pc.ondatachannel = (event) => {
-            this.dc = event.channel;
-            this.bindDataChannel();
-        };
-
-        this.pc.addEventListener("track", (event) => {
-            this.handleRemoteTrack(event);
-        });
-
-        this.pc.addEventListener("negotiationneeded", () => {
-            if (!this.canNegotiate()) {
-                return;
-            }
-            void this.negotiate();
-        });
+        this.pc.addEventListener("connectionstatechange", this.handleConnectionStateChange);
+        this.pc.addEventListener("icecandidate", this.handleIceCandidate);
+        this.pc.ondatachannel = this.handleDataChannel;
+        this.pc.addEventListener("track", this.handleTrackEvent);
+        this.pc.addEventListener("negotiationneeded", this.handleNegotiationNeeded);
     }
 
     // Public API (Facade surface)
@@ -103,6 +110,21 @@ export class RtcPeer {
 
     public disconnect = () => {
         this.dispatch("DISCONNECT");
+    };
+
+    public dispose = () => {
+        this.signaling.offSignal(this.onSignalHandler);
+        this.pc.removeEventListener("connectionstatechange", this.handleConnectionStateChange);
+        this.pc.removeEventListener("icecandidate", this.handleIceCandidate);
+        this.pc.removeEventListener("track", this.handleTrackEvent);
+        this.pc.removeEventListener("negotiationneeded", this.handleNegotiationNeeded);
+        this.pc.ondatachannel = null;
+        this.requestedId = null;
+        this.closeConnection();
+        this.setPeerState("passive");
+        if (this.pc.signalingState !== "closed") {
+            this.pc.close();
+        }
     };
 
     public send = (data: string) => {
@@ -138,7 +160,7 @@ export class RtcPeer {
             return;
         }
         this.dc.onmessage = (event) => {
-            this.onMessageHandler?.(event.data);
+            this.onMessageHandler?.(String(event.data));
         };
         this.dc.onopen = () => {
             this.attemptActivateMedia();
@@ -154,10 +176,16 @@ export class RtcPeer {
 
     // Signal handling (offer/answer/ice)
     private handleSignal = async (message: SignalMessage) => {
+        if (!this.shouldHandleSignal(message)) {
+            return;
+        }
         // Strategy/Command: type -> handler map.
         const handlers: Record<SignalMessage["type"], () => Promise<void>> = {
             offer: async () => {
                 this.remoteId = message.from;
+                if (this.state === "passive") {
+                    this.dispatch("REMOTE_CONNECT");
+                }
                 await this.pc.setRemoteDescription(
                     message.payload as RTCSessionDescriptionInit,
                 );
@@ -170,13 +198,11 @@ export class RtcPeer {
                     payload: answer,
                 };
                 this.signaling.relay(reply);
-                this.dispatch("CONNECTED");
             },
             answer: async () => {
                 await this.pc.setRemoteDescription(
                     message.payload as RTCSessionDescriptionInit,
                 );
-                this.dispatch("CONNECTED");
             },
             ice: async () => {
                 await this.pc.addIceCandidate(message.payload as RTCIceCandidateInit);
@@ -190,18 +216,16 @@ export class RtcPeer {
     private dispatch = (event: PeerEvent) => {
         // State Machine: event-driven transition + side effects.
         const next = nextState(this.state, event);
-        if (this.state === next) {
+        if (!this.setPeerState(next)) {
             return;
         }
-        this.state = next;
-        this.onStateChangeHandler?.(this.state);
 
-        if (next === "requesting") {
+        if (next === "requesting" && event === "CONNECT") {
             if (this.requestedId) {
                 this.remoteId = this.requestedId;
                 this.requestedId = null;
             }
-            void this.startOffer();
+            this.runTask(this.startOffer(), "startOffer");
             return;
         }
 
@@ -235,8 +259,18 @@ export class RtcPeer {
 
     // Cleanup for passive state
     private closeConnection = () => {
-        this.dc?.close();
+        const dataChannel = this.dc;
         this.dc = null;
+        this.negotiating = false;
+        this.renegotiateQueued = false;
+        if (dataChannel) {
+            dataChannel.onmessage = null;
+            dataChannel.onopen = null;
+            dataChannel.onclose = null;
+            if (dataChannel.readyState !== "closed") {
+                dataChannel.close();
+            }
+        }
         this.dispatchMedia("DISCONNECT");
         this.remoteId = null;
     };
@@ -308,14 +342,12 @@ export class RtcPeer {
 
     private dispatchMedia = (event: MediaEvent) => {
         const next = nextMediaState(this.mediaState, event);
-        if (next === this.mediaState) {
+        if (!this.setMediaState(next)) {
             if (event === "REQUEST" && next === "starting") {
                 this.attemptActivateMedia();
             }
             return;
         }
-        this.mediaState = next;
-        this.onMediaChangeHandler?.(this.mediaState);
         if (next === "starting") {
             this.detachLocalMedia();
             this.attemptActivateMedia();
@@ -343,6 +375,31 @@ export class RtcPeer {
 
     private canNegotiate = () => Boolean(this.remoteId && this.isMediaReady());
 
+    private shouldHandleSignal = (message: SignalMessage) => {
+        if (message.type === "offer") {
+            return this.state === "passive" || this.remoteId === message.from;
+        }
+        return this.remoteId === message.from;
+    };
+
+    private setPeerState = (next: PeerState) => {
+        if (this.state === next) {
+            return false;
+        }
+        this.state = next;
+        this.onStateChangeHandler?.(this.state);
+        return true;
+    };
+
+    private setMediaState = (next: MediaState) => {
+        if (this.mediaState === next) {
+            return false;
+        }
+        this.mediaState = next;
+        this.onMediaChangeHandler?.(this.mediaState);
+        return true;
+    };
+
     private negotiate = async () => {
         if (!this.remoteId) {
             return;
@@ -366,8 +423,16 @@ export class RtcPeer {
             this.negotiating = false;
             if (this.renegotiateQueued) {
                 this.renegotiateQueued = false;
-                void this.negotiate();
+                this.runTask(this.negotiate(), "negotiate");
             }
         }
     };
+
+    private runTask(task: Promise<void>, context: string) {
+        void task.catch((error) => {
+            console.error(`[rtc-peer] ${context} failed`, error);
+            this.dispatchMedia("DISCONNECT");
+            this.dispatch("DISCONNECT");
+        });
+    }
 }

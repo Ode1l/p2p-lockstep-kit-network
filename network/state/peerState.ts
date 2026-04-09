@@ -1,6 +1,6 @@
 export type PeerState = "passive" | "requesting" | "connected";
 
-export type PeerEvent = "CONNECT" | "CONNECTED" | "DISCONNECT";
+export type PeerEvent = "CONNECT" | "REMOTE_CONNECT" | "CONNECTED" | "DISCONNECT";
 
 export type Transition = {
   from: PeerState;
@@ -10,8 +10,8 @@ export type Transition = {
 
 const transitions: Transition[] = [
   { from: "passive", event: "CONNECT", to: "requesting" },
+  { from: "passive", event: "REMOTE_CONNECT", to: "requesting" },
   { from: "requesting", event: "CONNECTED", to: "connected" },
-  { from: "passive", event: "CONNECTED", to: "connected" },
   { from: "connected", event: "DISCONNECT", to: "passive" },
   { from: "requesting", event: "DISCONNECT", to: "passive" },
   { from: "connected", event: "CONNECT", to: "requesting" },

@@ -1,6 +1,5 @@
 import { encode, decodeSafe } from "../../utils";
 import type { SignalMessage as WireMessage } from "../../utils";
-import { Emitter } from "./emitter";
 
 const debugLog = (message: string, payload?: unknown) => {
   if (payload !== undefined) {
@@ -32,12 +31,22 @@ type SignalingEvents = {
   registered: { peerId: string; iceServers: RTCIceServer[]; resumeToken: string };
   error: unknown;
 };
+
+type RegistrationResult = SignalingEvents["registered"];
+
 export class SignalingClient {
   private ws: WebSocket | null = null;
   private peerId: string | null = null;
   private ready = false;
   private registeredPayload: WireMessage["payload"] | undefined;
-  private readonly emitter = new Emitter<SignalingEvents>();
+  private readonly signalHandlers = new Set<(message: SignalMessage) => void>();
+  private pendingRegistration:
+    | {
+        resolve: (payload: RegistrationResult) => void;
+        reject: (error: Error) => void;
+        timeoutId: number;
+      }
+    | null = null;
 
   public connect = (url: string) =>
     new Promise<void>((resolve, reject) => {
@@ -69,6 +78,7 @@ export class SignalingClient {
         this.ready = false;
         this.peerId = null;
         this.registeredPayload = undefined;
+        this.rejectPendingRegistration(new Error("ws closed"));
         window.clearTimeout(timeout);
         debugLog("[signaling] ws close", { code: event.code, reason: event.reason });
       });
@@ -77,14 +87,14 @@ export class SignalingClient {
         debugLog("[signaling] ws message", raw);
         const decoded = decodeSafe<WireMessage>(raw);
         if (!decoded.ok) {
-          this.emitter.emit("error", decoded.error);
+          this.rejectPendingRegistration(new Error("signaling decode error"));
           return;
         }
         const msg = decoded.value;
 
         if (msg.type === "ERROR") {
           debugLog("[signaling] error", msg);
-          this.emitter.emit("error", msg);
+          this.rejectPendingRegistration(new Error("signaling error"));
           return;
         }
 
@@ -97,7 +107,7 @@ export class SignalingClient {
               peerId: this.peerId,
               resumeToken: details.resumeToken,
             });
-            this.emitter.emit("registered", {
+            this.resolvePendingRegistration({
               peerId: this.peerId,
               iceServers: details.iceServers,
               resumeToken: details.resumeToken,
@@ -107,7 +117,7 @@ export class SignalingClient {
 
         if (msg.type === "RELAY" && msg.payload?.id) {
           const relay = msg.payload;
-          this.emitter.emit("signal", {
+          this.emitSignal({
             from: msg.from ?? "",
             to: msg.to ?? "",
             type: relay.id as SignalType,
@@ -117,84 +127,38 @@ export class SignalingClient {
       });
     });
 
-  public register = () =>
-    new Promise<{ peerId: string; iceServers: RTCIceServer[]; resumeToken: string }>(
-      (resolve, reject) => {
-        if (!this.ws || !this.ready) {
-          reject(new Error("not connected"));
-          return;
-        }
-        const msg: WireMessage = { type: "REGISTER" };
-        debugLog("[signaling] send REGISTER");
-        const timeout = window.setTimeout(() => {
-          this.emitter.off("registered", onRegistered);
-          this.emitter.off("error", onError);
-          debugLog("[signaling] register timeout");
-          reject(new Error("register timeout"));
-        }, 5000);
-        const onRegistered = (payload: {
-          peerId: string;
-          iceServers: RTCIceServer[];
-          resumeToken: string;
-        }) => {
-          this.emitter.off("registered", onRegistered);
-          this.emitter.off("error", onError);
-          window.clearTimeout(timeout);
-          debugLog("[signaling] register ok", payload.peerId);
-          resolve(payload);
-        };
-        const onError = (error: unknown) => {
-          this.emitter.off("registered", onRegistered);
-          this.emitter.off("error", onError);
-          window.clearTimeout(timeout);
-          debugLog("[signaling] register error", error);
-          reject(error instanceof Error ? error : new Error("signaling error"));
-        };
-        this.emitter.on("registered", onRegistered);
-        this.emitter.on("error", onError);
-        this.ws.send(encode(msg));
-      },
-    );
+  public register = async () => {
+    this.assertConnected();
+    const msg: WireMessage = { type: "REGISTER" };
+    debugLog("[signaling] send REGISTER");
+    const pending = this.awaitRegistration("register");
+    this.ws?.send(encode(msg));
+    try {
+      const payload = await pending;
+      debugLog("[signaling] register ok", payload.peerId);
+      return payload;
+    } catch (error) {
+      debugLog("[signaling] register error", error);
+      throw error;
+    }
+  };
 
-  public resume = (session: { peerId: string; resumeToken: string }) =>
-    new Promise<{ peerId: string; iceServers: RTCIceServer[]; resumeToken: string }>(
-      (resolve, reject) => {
-        if (!this.ws || !this.ready) {
-          reject(new Error("not connected"));
-          return;
-        }
-        const payload = { id: "resume", data: session };
-        const msg: WireMessage = { type: "RESUME", payload };
-        debugLog("[signaling] send RESUME", session.peerId);
-        const timeout = window.setTimeout(() => {
-          this.emitter.off("registered", onRegistered);
-          this.emitter.off("error", onError);
-          debugLog("[signaling] resume timeout");
-          reject(new Error("resume timeout"));
-        }, 5000);
-        const onRegistered = (payload: {
-          peerId: string;
-          iceServers: RTCIceServer[];
-          resumeToken: string;
-        }) => {
-          this.emitter.off("registered", onRegistered);
-          this.emitter.off("error", onError);
-          window.clearTimeout(timeout);
-          debugLog("[signaling] resume ok", payload.peerId);
-          resolve(payload);
-        };
-        const onError = (error: unknown) => {
-          this.emitter.off("registered", onRegistered);
-          this.emitter.off("error", onError);
-          window.clearTimeout(timeout);
-          debugLog("[signaling] resume error", error);
-          reject(error instanceof Error ? error : new Error("resume failed"));
-        };
-        this.emitter.on("registered", onRegistered);
-        this.emitter.on("error", onError);
-        this.ws.send(encode(msg));
-      },
-    );
+  public resume = async (session: { peerId: string; resumeToken: string }) => {
+    this.assertConnected();
+    const payload = { id: "resume", data: session };
+    const msg: WireMessage = { type: "RESUME", payload };
+    debugLog("[signaling] send RESUME", session.peerId);
+    const pending = this.awaitRegistration("resume");
+    this.ws?.send(encode(msg));
+    try {
+      const result = await pending;
+      debugLog("[signaling] resume ok", result.peerId);
+      return result;
+    } catch (error) {
+      debugLog("[signaling] resume error", error);
+      throw error;
+    }
+  };
 
   public relay = (message: SignalMessage) => {
     if (!this.ws || !this.ready) {
@@ -211,11 +175,11 @@ export class SignalingClient {
   };
 
   public onSignal(handler: (message: SignalMessage) => void) {
-    this.emitter.on("signal", handler);
+    this.signalHandlers.add(handler);
   }
 
   public offSignal(handler: (message: SignalMessage) => void) {
-    this.emitter.off("signal", handler);
+    this.signalHandlers.delete(handler);
   }
 
   private resolveRegisteredPayload() {
@@ -233,5 +197,51 @@ export class SignalingClient {
       resumeToken = data.resumeToken ?? "";
     }
     return { iceServers, resumeToken };
+  }
+
+  private assertConnected() {
+    if (!this.ws || !this.ready) {
+      throw new Error("not connected");
+    }
+  }
+
+  private awaitRegistration(label: "register" | "resume") {
+    if (this.pendingRegistration) {
+      return Promise.reject(new Error("registration already pending"));
+    }
+    return new Promise<RegistrationResult>((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        this.pendingRegistration = null;
+        debugLog(`[signaling] ${label} timeout`);
+        reject(new Error(`${label} timeout`));
+      }, 5000);
+      this.pendingRegistration = { resolve, reject, timeoutId };
+    });
+  }
+
+  private resolvePendingRegistration(payload: RegistrationResult) {
+    const pending = this.pendingRegistration;
+    if (!pending) {
+      return;
+    }
+    this.pendingRegistration = null;
+    window.clearTimeout(pending.timeoutId);
+    pending.resolve(payload);
+  }
+
+  private rejectPendingRegistration(error: Error) {
+    const pending = this.pendingRegistration;
+    if (!pending) {
+      return;
+    }
+    this.pendingRegistration = null;
+    window.clearTimeout(pending.timeoutId);
+    pending.reject(error);
+  }
+
+  private emitSignal(message: SignalMessage) {
+    for (const handler of [...this.signalHandlers]) {
+      handler(message);
+    }
   }
 }
