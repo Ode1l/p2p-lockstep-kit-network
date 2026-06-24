@@ -1,6 +1,6 @@
 {
   "name": "p2p-lockstep-kit-network",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "WebRTC signalling and peer abstractions for the p2p lockstep kit.",
   "license": "GPL-3.0-only",
   "type": "module",
