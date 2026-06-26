@@ -84,13 +84,14 @@ export class SignalingClient {
       });
       this.ws.addEventListener("message", (event) => {
         const raw = String(event.data);
-        debugLog("[signaling] ws message", raw);
         const decoded = decodeSafe<WireMessage>(raw);
         if (!decoded.ok) {
+          debugLog("[signaling] ws message decode error", raw);
           this.rejectPendingRegistration(new Error("signaling decode error"));
           return;
         }
         const msg = decoded.value;
+        debugLog("[signaling] ws message", msg);
 
         if (msg.type === "ERROR") {
           debugLog("[signaling] error", msg);

@@ -7,6 +7,7 @@ export class RtcPeer {
     private readonly id: string;
     private readonly pc: RTCPeerConnection;
     private dc: RTCDataChannel | null = null;
+    private readonly pendingSends: string[] = [];
     private remoteId: string | null = null;
     private requestedId: string | null = null;
     private state: PeerState = "passive";
@@ -24,7 +25,7 @@ export class RtcPeer {
     private readonly onMediaChangeHandler: ((state: MediaState) => void) | null = null;
     private readonly handleConnectionStateChange = () => {
         if (this.pc.connectionState === "connected") {
-            this.dispatch("CONNECTED");
+            this.markConnectedIfReady();
             return;
         }
         if (
@@ -129,6 +130,9 @@ export class RtcPeer {
 
     public send = (data: string) => {
         if (!this.dc || this.dc.readyState !== "open") {
+            if (this.state === "requesting") {
+                this.pendingSends.push(data);
+            }
             return;
         }
         this.dc.send(data);
@@ -163,6 +167,8 @@ export class RtcPeer {
             this.onMessageHandler?.(String(event.data));
         };
         this.dc.onopen = () => {
+            this.flushPendingSends();
+            this.markConnectedIfReady();
             this.attemptActivateMedia();
         };
         this.dc.onclose = () => {
@@ -170,7 +176,28 @@ export class RtcPeer {
             this.dispatch("DISCONNECT");
         };
         if (this.dc.readyState === "open") {
+            this.flushPendingSends();
+            this.markConnectedIfReady();
             this.attemptActivateMedia();
+        }
+    };
+
+    private markConnectedIfReady = () => {
+        if (!this.dc || this.dc.readyState !== "open") {
+            return;
+        }
+        this.dispatch("CONNECTED");
+    };
+
+    private flushPendingSends = () => {
+        if (!this.dc || this.dc.readyState !== "open") {
+            return;
+        }
+        while (this.pendingSends.length > 0) {
+            const data = this.pendingSends.shift();
+            if (data !== undefined) {
+                this.dc.send(data);
+            }
         }
     };
 
@@ -261,6 +288,7 @@ export class RtcPeer {
     private closeConnection = () => {
         const dataChannel = this.dc;
         this.dc = null;
+        this.pendingSends.length = 0;
         this.negotiating = false;
         this.renegotiateQueued = false;
         if (dataChannel) {
