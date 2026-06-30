@@ -1,1 +1,1 @@
-export { encode, decode, decodeSafe } from "./json";
+export { encode, decode, decodeSafe } from "./json.js";

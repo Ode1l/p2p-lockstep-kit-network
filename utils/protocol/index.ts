@@ -1,1 +1,1 @@
-export type { SignalMessage, SignalPayload, SignalType } from "./signaling";
+export type { SignalMessage, SignalPayload, SignalType } from "./signaling.js";

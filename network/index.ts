@@ -1,8 +1,8 @@
-import {SignalingClient} from "./signaling/client";
-import {RtcPeer} from "./transport/rtcPeer";
-import {clearSession, loadSession, saveSession} from "./signaling/session";
-import type {MediaState, PeerState} from "./state/peerState";
-import {decode, encode} from "../utils";
+import {SignalingClient} from "./signaling/client.js";
+import {RtcPeer} from "./transport/rtcPeer.js";
+import {clearSession, loadSession, saveSession} from "./signaling/session.js";
+import type {MediaState, PeerState} from "./state/peerState.js";
+import {decode, encode} from "../utils/index.js";
 
 export class NetworkClient {
     private readonly signaling: SignalingClient;
@@ -139,3 +139,17 @@ export class NetworkClient {
 }
 
 export const createClient = () => new NetworkClient();
+
+export {
+    NetworkEndpoint,
+} from "./networkEndpoint.js";
+export type {
+    EndpointRtcPeer,
+    EndpointRtcPeerFactory,
+    EndpointRtcPeerFactoryInput,
+    EndpointSignalingClient,
+    NetworkEndpointOptions,
+    PeerLink,
+    PeerLinkState,
+    Unsubscribe,
+} from "./networkEndpoint.js";

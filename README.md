@@ -7,6 +7,40 @@ Network layer walkthrough:
 
 Goal: provide a browser-first P2P session and message protocol layer for turn-based games, wrapping WebRTC DataChannel (data plane) and WebSocket (signaling/control plane). Target games: gomoku, chess, mahjong, Three Kingdom, and other turn-based/strategy games.
 
+## Shared endpoint and one-to-one links
+
+Version 0.1.4 adds `NetworkEndpoint` without changing the existing one-to-one
+`NetworkClient`. An endpoint registers or resumes one local Peer ID and shares
+one signaling WebSocket. Each call to `peer(remotePeerId)` returns an
+independent one-to-one `PeerLink` backed by its own
+`RtcPeer`/`RTCPeerConnection`.
+
+```ts
+import { NetworkEndpoint } from "p2p-lockstep-kit-network";
+
+const endpoint = new NetworkEndpoint();
+const { peerId: localPeerId } = await endpoint.register(signalUrl);
+const link = endpoint.peer(remotePeerId);
+
+link.onMessage((message) => console.log(remotePeerId, message));
+link.onStateChange((state) => console.log(remotePeerId, state));
+await link.connect();
+link.send({ type: "DIRECT_MESSAGE" });
+
+endpoint.onPeer((incomingLink) => {
+  // Includes links discovered from incoming offers.
+  console.log("peer link", incomingLink.remotePeerId);
+});
+```
+
+`NetworkEndpoint` does not define membership, topology, broadcast, offerer
+selection, negotiation concurrency or reconnect policy. A session layer decides
+which links to create and how to combine them. Call `link.disconnect()` for one
+connection or `endpoint.dispose()` for all links and the signaling connection.
+
+`PeerLink` is data-channel only. Existing one-to-one media methods remain on
+`NetworkClient` and are not expanded into an audio/video topology.
+
 ---
 
 ## 1. Scope and Principles

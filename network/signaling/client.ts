@@ -1,5 +1,5 @@
-import { encode, decodeSafe } from "../../utils";
-import type { SignalMessage as WireMessage } from "../../utils";
+import { encode, decodeSafe } from "../../utils/index.js";
+import type { SignalMessage as WireMessage } from "../../utils/index.js";
 
 const debugLog = (message: string, payload?: unknown) => {
   if (payload !== undefined) {
@@ -181,6 +181,15 @@ export class SignalingClient {
 
   public offSignal(handler: (message: SignalMessage) => void) {
     this.signalHandlers.delete(handler);
+  }
+
+  public close() {
+    this.rejectPendingRegistration(new Error("signaling closed"));
+    this.ready = false;
+    this.peerId = null;
+    this.registeredPayload = undefined;
+    this.ws?.close();
+    this.ws = null;
   }
 
   private resolveRegisteredPayload() {
